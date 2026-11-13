@@ -433,6 +433,7 @@ jobs:
           # ==========================================
           # 运行配置 ⬅️ 新增！
           # ==========================================
+          FAHAD_COMPACT_REPORT: ${{ vars.FAHAD_COMPACT_REPORT || 'true' }}
           REPORT_TYPE: ${{ vars.REPORT_TYPE || secrets.REPORT_TYPE || 'simple' }}
           REPORT_LANGUAGE: ${{ vars.REPORT_LANGUAGE || secrets.REPORT_LANGUAGE || '' }}
           REPORT_SHOW_LLM_MODEL: ${{ vars.REPORT_SHOW_LLM_MODEL || secrets.REPORT_SHOW_LLM_MODEL || 'true' }}
@@ -556,7 +557,9 @@ jobs:
           fi
 
           # 执行分析
-          if [ "$MODE" = "market-only" ]; then
+          if [ "${FAHAD_COMPACT_REPORT,,}" = "true" ] && [ "$MODE" != "market-only" ]; then
+            python -m src.services.fahad_compact_report $FORCE_RUN_ARG
+          elif [ "$MODE" = "market-only" ]; then
             python main.py --market-review $FORCE_RUN_ARG
           elif [ "$MODE" = "stocks-only" ]; then
             python main.py --no-market-review $FORCE_RUN_ARG

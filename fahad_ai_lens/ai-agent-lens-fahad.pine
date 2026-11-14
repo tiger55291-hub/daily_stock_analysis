@@ -57,7 +57,7 @@ float  stopAtr        = input.float(1.5, "Stop distance (x ATR)", minval = 0.1, 
 float  t1R            = input.float(1.5, "Target 1 (R multiple)", minval = 0.1, step = 0.1, group = G_RSK, display = display.none)
 float  t2R            = input.float(3.0, "Target 2 (R multiple)", minval = 0.1, step = 0.1, group = G_RSK, display = display.none)
 
-string packetMode     = input.string("Setups and trade updates", "Send JSON packet", options = ["Every bar close", "Setups and trade updates", "Off"], group = G_AGT, tooltip = "Create ONE alert with condition 'Any alert() function call' and your agent's webhook URL.", display = display.none)
+string packetMode     = input.string("Every bar close", "Send JSON packet", options = ["Every bar close", "Setups and trade updates", "Off"], group = G_AGT, tooltip = "Create ONE alert with condition 'Any alert() function call' and your agent's webhook URL.", display = display.none)
 int    recentCount    = input.int(5, "Recent candles in packet", minval = 1, maxval = 10, group = G_AGT, display = display.none)
 bool   showPreview    = input.bool(false, "Show packet preview on chart", group = G_AGT, display = display.none)
 

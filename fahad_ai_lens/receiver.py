@@ -2,7 +2,6 @@
 
 Standalone Python 3.11 HTTP service. No trading permissions or broker integration.
 """
-import hashlib
 import hmac
 import html
 import json
@@ -31,6 +30,17 @@ MIN_SCORE = int(os.getenv("MIN_SCORE", "80"))
 TIMEFRAME = os.getenv("TIMEFRAME", "5")
 ALLOWED_TICKERS = {s.strip().upper() for s in os.getenv("ALLOWED_TICKERS", "SPX,SPX500").split(",") if s.strip()}
 JOB_Q = queue.Queue(maxsize=100)
+
+
+def missing_configuration():
+    required = ["WEBHOOK_SECRET", "TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID"]
+    if MODEL_PROVIDER == "anthropic":
+        required.append("ANTHROPIC_API_KEY")
+    elif MODEL_PROVIDER == "gemini":
+        required.append("GEMINI_API_KEY")
+    else:
+        required.append("valid MODEL_PROVIDER")
+    return [key for key in required if key == "valid MODEL_PROVIDER" or not os.getenv(key)]
 SEEN = set()
 FIFO = deque()
 SEEN_LOCK = threading.Lock()
@@ -167,12 +177,17 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(payload)
 
     def do_GET(self):
-        self.reply(200, {"ok": True, "service": "fahad20-ai-lens"}) if urlparse(self.path).path == "/health" else self.reply(404, {"ok": False})
+        if urlparse(self.path).path == "/health":
+            self.reply(200, {"ok": True, "ready": not missing_configuration(), "service": "fahad20-ai-lens"})
+        else:
+            self.reply(404, {"ok": False})
 
     def do_POST(self):
         req = urlparse(self.path)
         if req.path != "/webhook":
             return self.reply(404, {"ok": False})
+        if missing_configuration():
+            return self.reply(503, {"ok": False, "message": "service configuration incomplete"})
         supplied = parse_qs(req.query).get("token", [""])[0]
         if not hmac.compare_digest(supplied, WEBHOOK_SECRET):
             return self.reply(401, {"ok": False})
@@ -206,16 +221,9 @@ class Handler(BaseHTTPRequestHandler):
 
 
 if __name__ == "__main__":
-    required = ["WEBHOOK_SECRET", "TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID"]
-    if MODEL_PROVIDER == "anthropic":
-        required.append("ANTHROPIC_API_KEY")
-    elif MODEL_PROVIDER == "gemini":
-        required.append("GEMINI_API_KEY")
-    else:
-        raise SystemExit("MODEL_PROVIDER must be anthropic or gemini")
-    missing = [n for n in required if not os.getenv(n)]
+    missing = missing_configuration()
     if missing:
-        raise SystemExit("Missing environment variables: " + ", ".join(missing))
+        LOG.warning("Service not ready; configure: %s", ", ".join(missing))
     threading.Thread(target=worker, daemon=True).start()
     LOG.info("Listening on port %d", PORT)
     ThreadingHTTPServer(("0.0.0.0", PORT), Handler).serve_forever()

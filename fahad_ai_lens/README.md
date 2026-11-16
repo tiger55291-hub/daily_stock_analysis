@@ -11,9 +11,9 @@ This is the replacement plan for the **analysis output** of `@Fahad20AnalysisBot
 1. Open **CBOE:SPX**, **5 minutes**, in TradingView.
 2. Paste `ai-agent-lens-fahad.pine` into Pine Editor, Save, Add to chart.
 3. Default settings: score 80/100, higher time frame 15 minutes, compact panel, minimal drawings, packet mode "Every bar close" (keeps the free receiver active during market hours; Telegram sends only qualified setups).
-4. Make one alert: **FAHAD AI Lens (SPX 5m) → Any alert() function call**.
+4. After a script change, update the chart script and recreate/update each alert snapshot; existing alerts retain their saved script version. Make one alert: **FAHAD AI Lens (SPX 5m) → Any alert() function call**.
 5. Under Notifications enable **Webhook URL**: `https://YOUR-RENDER-URL/webhook?token=YOUR_WEBHOOK_SECRET`. Leave the message field unchanged. TradingView's script sends JSON at candle close. Keep two-factor authentication enabled in TradingView.
-6. The receiver only forwards fresh **LONG_SETUP / SHORT_SETUP** events when score >=80, 15-minute direction agrees, and regime is not a range/high-volatility spike. The model can still choose WAIT. Each accepted packet can produce at most one telegram signal per server session.
+6. The receiver only forwards fresh **LONG_SETUP / SHORT_SETUP** events when score >=80, 15-minute direction agrees, and regime is not a range. High-volatility setups require score >=85 with aligned higher-timeframe direction. The model can still choose WAIT. Each accepted packet can produce at most one telegram signal per server session.
 
 ## Hosting (separate Render web service)
 Use a new **Python** web service connected to the repository and branch `experiment/fahad20-ai-lens`:

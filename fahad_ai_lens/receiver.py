@@ -70,7 +70,7 @@ def validate(p):
     is_long = p["event"] == "LONG_SETUP"
     scores = p.get("scores") or {}
     s = scores.get("long" if is_long else "short")
-    required_score = max(MIN_SCORE, 90) if p.get("regime") == "HIGH_VOLATILITY" else MIN_SCORE
+    required_score = max(MIN_SCORE, 85) if p.get("regime") == "HIGH_VOLATILITY" else MIN_SCORE
     if not isinstance(s, (int, float)) or s < required_score:
         return "score below minimum"
     bias = (p.get("trend") or {}).get("htf_bias")

@@ -32,7 +32,7 @@ string G_AGT  = "AI agent packet"
 string G_VIS  = "Display"
 
 int    scoreThreshold = input.int(80, "Setup score threshold", minval = 50, maxval = 100, group = G_SIG, tooltip = "A LONG or SHORT setup fires when its score crosses this value on a closed bar.", display = display.none)
-bool   blockHighVol   = input.bool(true, "Require score 90 and aligned HTF in HIGH_VOLATILITY", group = G_SIG, display = display.none)
+bool   blockHighVol   = input.bool(true, "Require score 85 and aligned HTF in HIGH_VOLATILITY", group = G_SIG, display = display.none)
 string htfTf          = input.timeframe("15", "Higher timeframe", group = G_SIG, tooltip = "Must be higher than the chart timeframe. Otherwise the HTF factor is neutral.", display = display.none)
 int    htfEmaLen      = input.int(50, "Higher timeframe EMA length", minval = 2, group = G_SIG, display = display.none)
 
@@ -248,8 +248,8 @@ max_bars_back(candleBody, 12)
 // SETUPS AND TRADE TRACKING (closed bars only)
 // ═════════════════════════════════════════════════════════════════════════════
 // High volatility requires a stronger score and confirmed HTF agreement.
-int longRequired = blockHighVol and regime == "HIGH_VOLATILITY" ? math.max(scoreThreshold, 90) : scoreThreshold
-int shortRequired = blockHighVol and regime == "HIGH_VOLATILITY" ? math.max(scoreThreshold, 90) : scoreThreshold
+int longRequired = blockHighVol and regime == "HIGH_VOLATILITY" ? math.max(scoreThreshold, 85) : scoreThreshold
+int shortRequired = blockHighVol and regime == "HIGH_VOLATILITY" ? math.max(scoreThreshold, 85) : scoreThreshold
 bool longEligible = longScore >= longRequired and regime != "TREND_DOWN" and (not (blockHighVol and regime == "HIGH_VOLATILITY") or htfBias == 1)
 bool shortEligible = shortScore >= shortRequired and regime != "TREND_UP" and (not (blockHighVol and regime == "HIGH_VOLATILITY") or htfBias == -1)
 bool longCond = longEligible and not longEligible[1]

@@ -54,13 +54,13 @@ class ValidateTests(unittest.TestCase):
 
     def test_high_volatility_boundary(self):
         for event, bias, key in (("LONG_SETUP", "UP", "long"), ("SHORT_SETUP", "DOWN", "short")):
-            for score in (89, 90, 100):
+            for score in (84, 85, 90, 100):
                 with self.subTest(event=event, score=score):
                     p = packet()
                     p.update(event=event, regime="HIGH_VOLATILITY")
                     p["trend"]["htf_bias"] = bias
                     p["scores"][key] = score
-                    self.assertEqual(validate(p), None if score >= 90 else "score below minimum")
+                    self.assertEqual(validate(p), None if score >= 85 else "score below minimum")
             p["trend"]["htf_bias"] = "DOWN" if bias == "UP" else "UP"
             self.assertEqual(validate(p), "HTF not aligned")
 

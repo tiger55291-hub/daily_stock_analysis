@@ -65,12 +65,13 @@ def validate(p):
         return "ticker not selected"
     if str(p.get("timeframe")) != TIMEFRAME:
         return "timeframe mismatch"
-    if p.get("regime") in ("RANGE", "HIGH_VOLATILITY"):
+    if p.get("regime") == "RANGE":
         return "unfavorable regime"
     is_long = p["event"] == "LONG_SETUP"
     scores = p.get("scores") or {}
     s = scores.get("long" if is_long else "short")
-    if not isinstance(s, (int, float)) or s < MIN_SCORE:
+    required_score = max(MIN_SCORE, 90) if p.get("regime") == "HIGH_VOLATILITY" else MIN_SCORE
+    if not isinstance(s, (int, float)) or s < required_score:
         return "score below minimum"
     bias = (p.get("trend") or {}).get("htf_bias")
     if bias != ("UP" if is_long else "DOWN"):

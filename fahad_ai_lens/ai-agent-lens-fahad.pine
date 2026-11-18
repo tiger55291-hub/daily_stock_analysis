@@ -32,6 +32,7 @@ string G_AGT  = "AI agent packet"
 string G_VIS  = "Display"
 
 int    scoreThreshold = input.int(80, "Setup score threshold", minval = 50, maxval = 100, group = G_SIG, tooltip = "A LONG or SHORT setup fires when its score crosses this value on a closed bar.", display = display.none)
+bool   retestPilot = input.bool(false, "SPX500 retest pilot", group = G_SIG)
 bool   blockHighVol   = input.bool(true, "Require score 85 and aligned HTF in HIGH_VOLATILITY", group = G_SIG, display = display.none)
 string htfTf          = input.timeframe("15", "Higher timeframe", group = G_SIG, tooltip = "Must be higher than the chart timeframe. Otherwise the HTF factor is neutral.", display = display.none)
 int    htfEmaLen      = input.int(50, "Higher timeframe EMA length", minval = 2, group = G_SIG, display = display.none)
@@ -323,7 +324,43 @@ if barstate.isconfirmed
         lastSigSide := "SHORT"
     tradeUpdate := tStatus != statusBefore and not openedLong and not openedShort
 
-string eventStr = openedLong ? "LONG_SETUP" : openedShort ? "SHORT_SETUP" : tradeUpdate ? "TRADE_UPDATE" : "BAR_CLOSE"
+bool pilotActive = retestPilot and syminfo.tickerid == "CAPITALCOM:SPX500" and timeframe.in_seconds() == 300
+var float brokenLevel = na
+var int breakBar = na
+var int breakSide = 0
+var bool retestSent = false
+bool watchRetest = false
+if pilotActive and barstate.isconfirmed
+    if breakUp or breakDown
+        brokenLevel := breakUp ? swingH1 : swingL1
+        breakBar := bar_index
+        breakSide := breakUp ? 1 : -1
+        retestSent := false
+    else if not na(breakBar)
+        if bar_index - breakBar > 6 or (close - brokenLevel) * breakSide <= 0
+            brokenLevel := na
+            breakBar := na
+        else if not retestSent
+            bool touched = breakSide == 1 ? low <= brokenLevel + 0.15 * atrV : high >= brokenLevel - 0.15 * atrV
+            bool rejected = breakSide == 1 ? bullBar : bearBar
+            watchRetest := touched and rejected and math.abs(close - brokenLevel) <= atrV
+            if watchRetest
+                retestSent := true
+
+bool setupOpened = openedLong or openedShort
+int setupSide = openedLong ? 1 : -1
+bool extended = pilotActive and setupOpened and not na(brokenLevel) and breakSide == setupSide and math.abs(close - brokenLevel) > 1.5 * atrV
+float obstacle = na
+if pilotActive and setupOpened
+    float swing = openedLong ? swingH1 : swingL1
+    float prevDay = openedLong ? pdh : pdl
+    float swingDistance = (swing - close) * setupSide
+    float dayDistance = (prevDay - close) * setupSide
+    obstacle := swingDistance > 0 ? swingDistance : na
+    if dayDistance > 0
+        obstacle := na(obstacle) ? dayDistance : math.min(obstacle, dayDistance)
+bool crowded = pilotActive and setupOpened and not na(obstacle) and obstacle < math.min(10.0, math.abs(tT1 - tEntry))
+string eventStr = extended or crowded ? (openedLong ? "LONG_WAIT_RETEST" : "SHORT_WAIT_RETEST") : openedLong ? "LONG_SETUP" : openedShort ? "SHORT_SETUP" : watchRetest ? (breakSide == 1 ? "LONG_RETEST_WATCH" : "SHORT_RETEST_WATCH") : tradeUpdate ? "TRADE_UPDATE" : "BAR_CLOSE"
 string stateCode = "LENS|" + syminfo.ticker + "|" + timeframe.period + "|" + regime + "|L" + str.tostring(longScore) + "|S" + str.tostring(shortScore) + "|" + tSideStr + ":" + tStatus
 
 // ═════════════════════════════════════════════════════════════════════════════
@@ -338,6 +375,8 @@ f_packet() =>
     pk += ',"timeframe":"' + timeframe.period + '"'
     pk += ',"time":"' + t + '"'
     pk += ',"state_code":"' + stateCode + '"'
+    if pilotActive
+        pk += ',"retest":{"level":' + f_num(brokenLevel, fp) + ',"extended":' + f_bool(extended) + ',"crowded":' + f_bool(crowded) + '}'
     // Candle breakdown
     pk += ',"candle":{"open":' + f_num(open, fp) + ',"high":' + f_num(high, fp) + ',"low":' + f_num(low, fp) + ',"close":' + f_num(close, fp)
     pk += ',"volume":' + f_num(volume, "#.####") + ',"direction":"' + cDir + '"'

@@ -55,16 +55,48 @@ def post_json(url, data, headers=None, timeout=16):
         return json.loads(response.read().decode("utf-8"))
 
 
+PILOT_EVENTS = {
+    "LONG_RETEST_WATCH", "SHORT_RETEST_WATCH",
+    "LONG_WAIT_RETEST", "SHORT_WAIT_RETEST",
+}
+
+
+def validate_candle_time(p):
+    try:
+        close = datetime.fromisoformat(p["time"].replace("Z", "+00:00")).astimezone(timezone.utc)
+        minutes = (datetime.now(timezone.utc) - close).total_seconds() / 60
+        if minutes < -2 or minutes > 30:
+            return "stale or future packet"
+    except (KeyError, AttributeError, ValueError, TypeError):
+        return "invalid candle time"
+    return None
+
+
 def validate(p):
     if not isinstance(p, dict) or p.get("schema") != "ai-agent-lens/v1":
         return "bad schema"
-    if p.get("event") not in ("LONG_SETUP", "SHORT_SETUP"):
+    event = p.get("event")
+    pilot = isinstance(event, str) and event in PILOT_EVENTS
+    if not pilot and event not in ("LONG_SETUP", "SHORT_SETUP"):
         return "not a new setup"
     ticker = str(p.get("symbol", "")).split(":")[-1].upper()
     if ticker not in ALLOWED_TICKERS:
         return "ticker not selected"
     if str(p.get("timeframe")) != TIMEFRAME:
         return "timeframe mismatch"
+    if pilot:
+        if p.get("symbol") != "CAPITALCOM:SPX500" or str(p.get("timeframe")) != "5":
+            return "pilot requires CAPITALCOM:SPX500 5m"
+        context = p.get("retest")
+        if not isinstance(context, dict):
+            return "missing retest context"
+        if event.endswith("_WATCH") and type(context.get("level")) not in (int, float):
+            return "missing retest level"
+        if event.endswith("_WAIT_RETEST") and not (
+            context.get("extended") is True or context.get("crowded") is True
+        ):
+            return "missing wait reason"
+        return validate_candle_time(p)
     if p.get("regime") == "RANGE":
         return "unfavorable regime"
     is_long = p["event"] == "LONG_SETUP"
@@ -79,14 +111,7 @@ def validate(p):
     t = p.get("trade") or {}
     if not all(isinstance(t.get(x), (int, float)) for x in ("entry", "stop", "target_1", "target_2")):
         return "missing prices"
-    try:
-        close = datetime.fromisoformat(p["time"].replace("Z", "+00:00")).astimezone(timezone.utc)
-        minutes = (datetime.now(timezone.utc) - close).total_seconds() / 60
-        if minutes < -2 or minutes > 30:
-            return "stale or future packet"
-    except (KeyError, AttributeError, ValueError, TypeError):
-        return "invalid candle time"
-    return None
+    return validate_candle_time(p)
 
 
 def ai_decision(p):
@@ -155,10 +180,31 @@ def telegram_signal(p, ai):
     post_json(url, {"chat_id": CHAT_ID, "text": msg, "parse_mode": "HTML"}, timeout=12)
 
 
+def telegram_pilot(p):
+    event = p["event"]
+    context = p["retest"]
+    side = "CALL" if event.startswith("LONG_") else "PUT"
+    if event.endswith("_WATCH"):
+        status = f"مراقبة {side} | إعادة اختبار {context['level']}"
+    else:
+        reasons = []
+        if context.get("extended") is True:
+            reasons.append("امتداد السعر عن مستوى الكسر")
+        if context.get("crowded") is True:
+            reasons.append("مستوى قريب في مسار الهدف")
+        status = f"انتظار إعادة اختبار {side} | " + "، ".join(reasons)
+    msg = f"FAHAD20 | SPX500 5m\n{status}\nشمعة: {p['time']} UTC"
+    url = "https://api.telegram.org/bot" + BOT_TOKEN + "/sendMessage"
+    post_json(url, {"chat_id": CHAT_ID, "text": msg}, timeout=12)
+
+
 def worker():
     while True:
         p = JOB_Q.get()
         try:
+            if p["event"] in PILOT_EVENTS:
+                telegram_pilot(p)
+                continue
             verdict = ai_decision(p)
             if verdict:
                 telegram_signal(p, verdict)

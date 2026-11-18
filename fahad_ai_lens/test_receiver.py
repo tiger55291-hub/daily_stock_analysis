@@ -47,10 +47,10 @@ class ValidateTests(unittest.TestCase):
         p["event"] = "TRADE_UPDATE"
         self.assertEqual(validate(p), "not a new setup")
 
-    def test_range_ignored(self):
+    def test_range_reaches_ai_validation(self):
         p = packet()
         p["regime"] = "RANGE"
-        self.assertEqual(validate(p), "unfavorable regime")
+        self.assertEqual(validate(p), None)
 
     def test_high_volatility_boundary(self):
         for event, bias, key in (("LONG_SETUP", "UP", "long"), ("SHORT_SETUP", "DOWN", "short")):

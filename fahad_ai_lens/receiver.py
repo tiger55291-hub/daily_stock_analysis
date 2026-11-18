@@ -97,8 +97,6 @@ def validate(p):
         ):
             return "missing wait reason"
         return validate_candle_time(p)
-    if p.get("regime") == "RANGE":
-        return "unfavorable regime"
     is_long = p["event"] == "LONG_SETUP"
     scores = p.get("scores") or {}
     s = scores.get("long" if is_long else "short")
@@ -260,17 +258,3 @@ class Handler(BaseHTTPRequestHandler):
             FIFO.append(identity)
             if len(FIFO) > 1000:
                 SEEN.discard(FIFO.popleft())
-        return self.reply(200, {"ok": True, "queued": True})
-
-    def log_message(self, fmt, *args):
-        # Do not log the webhook path: the query contains a shared secret.
-        pass
-
-
-if __name__ == "__main__":
-    missing = missing_configuration()
-    if missing:
-        LOG.warning("Service not ready; configure: %s", ", ".join(missing))
-    threading.Thread(target=worker, daemon=True).start()
-    LOG.info("Listening on port %d", PORT)
-    ThreadingHTTPServer(("0.0.0.0", PORT), Handler).serve_forever()

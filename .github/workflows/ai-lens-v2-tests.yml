@@ -1,0 +1,17 @@
+name: FAHAD20 V2 tests
+on:
+  push:
+    branches: [experiment/ai-lens-durable-signals-v2]
+  workflow_dispatch:
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Compile and test
+        run: |
+          python -m compileall -q fahad_ai_lens
+          python -m unittest discover -s fahad_ai_lens -p 'test_*.py' -v

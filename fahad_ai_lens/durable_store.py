@@ -22,7 +22,7 @@ class LedgerError(RuntimeError):
 
 
 class SignalLedger:
-    def __init__(self, url=None, secret=None, schema="fahad_ai_lens", timeout=5):
+    def __init__(self, url=None, secret=None, schema="public", timeout=5):
         self.url = (url or os.getenv("SUPABASE_URL", "")).rstrip("/")
         self.secret = secret or os.getenv("SUPABASE_SECRET_KEY", "")
         self.schema = schema

@@ -8,6 +8,11 @@ import json
 import logging
 import os
 import queue
+import hashlib
+import time
+from urllib.error import HTTPError, URLError
+from fahad_ai_lens.delivery_policy import signal_id, expired, retry_policy
+from fahad_ai_lens.durable_store import SignalLedger, LedgerError
 import threading
 import urllib.request
 from collections import deque
@@ -30,6 +35,8 @@ MIN_SCORE = int(os.getenv("MIN_SCORE", "80"))
 TIMEFRAME = os.getenv("TIMEFRAME", "5")
 ALLOWED_TICKERS = {s.strip().upper() for s in os.getenv("ALLOWED_TICKERS", "SPX,SPX500").split(",") if s.strip()}
 JOB_Q = queue.Queue(maxsize=100)
+DURABLE_ENABLED = os.getenv("DURABLE_ENABLED", "false").lower() == "true"
+LEDGER = SignalLedger() if DURABLE_ENABLED else None
 
 
 def missing_configuration():
@@ -175,7 +182,7 @@ def telegram_signal(p, ai):
         + "تجريبي | المستويات للأصل لا لعقد الأوبشن"
     )
     url = "https://api.telegram.org/bot" + BOT_TOKEN + "/sendMessage"
-    post_json(url, {"chat_id": CHAT_ID, "text": msg, "parse_mode": "HTML"}, timeout=12)
+    return post_json(url, {"chat_id": CHAT_ID, "text": msg, "parse_mode": "HTML"}, timeout=12)
 
 
 def telegram_pilot(p):
@@ -193,21 +200,65 @@ def telegram_pilot(p):
         status = f"انتظار إعادة اختبار {side} | " + "، ".join(reasons)
     msg = f"FAHAD20 | SPX500 5m\n{status}\nشمعة: {p['time']} UTC"
     url = "https://api.telegram.org/bot" + BOT_TOKEN + "/sendMessage"
-    post_json(url, {"chat_id": CHAT_ID, "text": msg}, timeout=12)
+    return post_json(url, {"chat_id": CHAT_ID, "text": msg}, timeout=12)
 
 
 def worker():
     while True:
-        p = JOB_Q.get()
+        item = JOB_Q.get()
+        p = item["packet"] if isinstance(item, dict) and "packet" in item else item
+        sid = item.get("signal_id") if isinstance(item, dict) else None
+        stage = "claude"
         try:
-            if p["event"] in PILOT_EVENTS:
-                telegram_pilot(p)
+            if DURABLE_ENABLED and expired(p):
+                LEDGER.update(sid, status="expired_stale", processed_at=datetime.now(timezone.utc).isoformat())
                 continue
-            verdict = ai_decision(p)
-            if verdict:
-                telegram_signal(p, verdict)
+            if DURABLE_ENABLED:
+                LEDGER.update(sid, status="processing")
+            verdict = None
+            if p["event"] not in PILOT_EVENTS:
+                for attempt in range(1, 4):
+                    try:
+                        verdict = ai_decision(p)
+                        break
+                    except (HTTPError, URLError, TimeoutError) as exc:
+                        action, delay = retry_policy("claude", exc, attempt, p)
+                        if action != "retry":
+                            raise
+                        if delay and DURABLE_ENABLED:
+                            LEDGER.update(sid, attempts=attempt)
+                        time.sleep(delay or 0)
+                if verdict is None:
+                    if DURABLE_ENABLED:
+                        LEDGER.update(sid, status="ai_rejected", processed_at=datetime.now(timezone.utc).isoformat())
+                    continue
+            if DURABLE_ENABLED and expired(p):
+                LEDGER.update(sid, status="expired_stale", processed_at=datetime.now(timezone.utc).isoformat())
+                continue
+            stage = "telegram"
+            for attempt in range(1, 4):
+                try:
+                    response = telegram_pilot(p) if p["event"] in PILOT_EVENTS else telegram_signal(p, verdict)
+                    if DURABLE_ENABLED:
+                        LEDGER.update(sid, status="sent", attempts=attempt,
+                                      sent_at=datetime.now(timezone.utc).isoformat(),
+                                      telegram_message_id=(response or {}).get("result", {}).get("message_id"))
+                    break
+                except (HTTPError, URLError, TimeoutError) as exc:
+                    action, delay = retry_policy("telegram", exc, attempt, p)
+                    if DURABLE_ENABLED:
+                        LEDGER.update(sid, status=action if action != "retry" else "processing",
+                                      attempts=attempt, last_error=type(exc).__name__)
+                    if action != "retry":
+                        break
+                    time.sleep(delay or 0)
         except Exception as exc:
             LOG.error("AI or Telegram failed (%s)", type(exc).__name__)
+            if DURABLE_ENABLED and sid:
+                try:
+                    LEDGER.update(sid, status="failed", last_error=type(exc).__name__)
+                except LedgerError:
+                    LOG.error("Failed to persist signal failure")
         finally:
             JOB_Q.task_done()
 
@@ -246,6 +297,27 @@ class Handler(BaseHTTPRequestHandler):
         reason = validate(packet)
         if reason:
             return self.reply(200, {"ok": True, "ignored": reason})
+        if DURABLE_ENABLED:
+            sid = signal_id(packet)
+            if JOB_Q.full():
+                return self.reply(503, {"ok": False, "message": "queue full"})
+            row = {"signal_id": sid, "symbol": packet["symbol"],
+                   "timeframe": str(packet["timeframe"]), "candle_time": packet["time"],
+                   "event_type": packet["event"], "payload": packet,
+                   "expires_at": (datetime.fromisoformat(packet["time"].replace("Z", "+00:00"))
+                                  + __import__("datetime").timedelta(minutes=5)).isoformat()}
+            try:
+                inserted = LEDGER.insert(row)
+                if not inserted:
+                    return self.reply(200, {"ok": True, "ignored": "duplicate"})
+                JOB_Q.put_nowait({"packet": packet, "signal_id": sid})
+            except LedgerError:
+                LOG.error("Supabase unavailable; packet not accepted")
+                return self.reply(503, {"ok": False, "message": "storage unavailable"})
+            except queue.Full:
+                LEDGER.update(sid, status="failed", last_error="queue full")
+                return self.reply(503, {"ok": False, "message": "queue full"})
+            return self.reply(200, {"ok": True, "queued": True})
         identity = (packet["symbol"], packet["timeframe"], packet["time"], packet["event"])
         with SEEN_LOCK:
             if identity in SEEN:

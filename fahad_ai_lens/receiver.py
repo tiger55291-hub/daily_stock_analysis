@@ -11,8 +11,14 @@ import queue
 import hashlib
 import time
 from urllib.error import HTTPError, URLError
-from fahad_ai_lens.delivery_policy import signal_id, expired, retry_policy
-from fahad_ai_lens.durable_store import SignalLedger, LedgerError
+try:
+    from fahad_ai_lens.delivery_policy import signal_id, expired, retry_policy
+    from fahad_ai_lens.durable_store import SignalLedger, LedgerError
+except ModuleNotFoundError as exc:
+    if exc.name != "fahad_ai_lens":
+        raise
+    from delivery_policy import signal_id, expired, retry_policy
+    from durable_store import SignalLedger, LedgerError
 import threading
 import urllib.request
 from collections import deque

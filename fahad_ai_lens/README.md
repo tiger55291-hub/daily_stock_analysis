@@ -41,3 +41,24 @@ The previous scheduled **Daily Stock Analysis** GitHub Actions workflow `.github
 - Raw JSON packets can contain malformed or misleading data. The receiver checks the schema, timeframe, symbol, freshness and numeric levels before analysis.
 - Claude Fable 5.2 is supported via Anthropic's official API. Claude consumer subscriptions do **not** automatically provide an API key.
 - The bot token, Gemini key, chat ID and live Render/TradingView settings cannot be inferred from a GitHub repository; they must be configured securely.
+
+## V2 trade outcomes
+
+Only delivered 5-minute CALL and PUT setups with valid price levels enter the
+statistics. Observation begins after the signal candle. T1 means a win, SL
+means a loss, and touching both in one candle means a loss. Levels and results
+are measured on the charted asset. The win rate uses closed observations.
+
+The database migration in `supabase/migrations` stores the latest candle cursor
+and the outcome in Supabase. Each incoming candle resumes pending observations.
+Deploy the migration before deploying the receiver. Keep the existing alert
+mode **Every bar close**. To enable recovery over missing messages and session
+breaks, update the Pine script and recreate the TradingView alerts so recent
+candles include their actual close times. Missing predecessor candles leave
+the outcome open pending sufficient data. Older alerts can record consecutive
+5-minute candles. The candle journal keeps 30 days per active symbol.
+
+`GET /stats?period=daily` or `GET /stats?period=weekly` returns up to 300 recent
+buckets for the selected period, grouped by New York signal date, exact symbol
+and CALL/PUT. Send `Authorization: Bearer <WEBHOOK_SECRET>` in the request. The
+private Supabase view `lens_trade_stats` also contains the saved aggregates.

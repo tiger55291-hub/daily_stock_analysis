@@ -30,8 +30,8 @@ class SignalLedger:
         if not self.url or not self.secret:
             raise LedgerError("Supabase server credentials are missing")
 
-    def _request(self, method, query="", payload=None, prefer=None):
-        url = self.url + "/rest/v1/signals_log" + query
+    def _request(self, method, query="", payload=None, prefer=None, resource="signals_log"):
+        url = self.url + "/rest/v1/" + resource + query
         headers = {
             "apikey": self.secret,
             "Accept-Profile": self.schema,
@@ -77,3 +77,17 @@ class SignalLedger:
         changes["updated_at"] = datetime.now(timezone.utc).isoformat()
         query = "?signal_id=eq." + urllib.parse.quote(signal_id, safe="")
         self._request("PATCH", query, changes, prefer="return=minimal")
+
+
+    def record_candles(self, symbol, bars):
+        self._request("POST", payload={"p_symbol": symbol, "p_bars": bars},
+                      resource="rpc/record_lens_candles")
+
+    def reconcile_trades(self, symbol):
+        self._request("POST", payload={"p_symbol": symbol},
+                      resource="rpc/reconcile_lens_trades")
+
+    def trade_stats(self, period):
+        # The receiver accepts only these two constant periods.
+        query = "?period=eq." + period + "&order=period_start.desc,symbol,side&limit=300"
+        return self._request("GET", query, resource="lens_trade_stats") or []

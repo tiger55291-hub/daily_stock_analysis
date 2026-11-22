@@ -14,11 +14,13 @@ from urllib.error import HTTPError, URLError
 try:
     from fahad_ai_lens.delivery_policy import signal_id, expired, retry_policy
     from fahad_ai_lens.durable_store import SignalLedger, LedgerError
+    from fahad_ai_lens.trade_outcomes import candle_batch, tracking_fields
 except ModuleNotFoundError as exc:
     if exc.name != "fahad_ai_lens":
         raise
     from delivery_policy import signal_id, expired, retry_policy
     from durable_store import SignalLedger, LedgerError
+    from trade_outcomes import candle_batch, tracking_fields
 import threading
 import urllib.request
 from collections import deque
@@ -41,6 +43,7 @@ MIN_SCORE = int(os.getenv("MIN_SCORE", "80"))
 TIMEFRAME = os.getenv("TIMEFRAME", "5")
 ALLOWED_TICKERS = {s.strip().upper() for s in os.getenv("ALLOWED_TICKERS", "SPX,SPX500").split(",") if s.strip()}
 JOB_Q = queue.Queue(maxsize=100)
+CANDLE_Q = queue.Queue(maxsize=512)
 DURABLE_ENABLED = os.getenv("DURABLE_ENABLED", "false").lower() == "true"
 LEDGER = SignalLedger() if DURABLE_ENABLED else None
 
@@ -209,6 +212,23 @@ def telegram_pilot(p):
     return post_json(url, {"chat_id": CHAT_ID, "text": msg}, timeout=12)
 
 
+def candle_worker():
+    while True:
+        symbol, bars = CANDLE_Q.get()
+        try:
+            for attempt in range(3):
+                try:
+                    LEDGER.record_candles(symbol, bars)
+                    break
+                except LedgerError:
+                    if attempt == 2:
+                        LOG.warning("Could not store TradingView candles")
+                    else:
+                        time.sleep(attempt + 1)
+        finally:
+            CANDLE_Q.task_done()
+
+
 def worker():
     while True:
         item = JOB_Q.get()
@@ -246,9 +266,16 @@ def worker():
                 try:
                     response = telegram_pilot(p) if p["event"] in PILOT_EVENTS else telegram_signal(p, verdict)
                     if DURABLE_ENABLED:
+                        tracking = tracking_fields(p)
                         LEDGER.update(sid, status="sent", attempts=attempt,
                                       sent_at=datetime.now(timezone.utc).isoformat(),
-                                      telegram_message_id=(response or {}).get("result", {}).get("message_id"))
+                                      telegram_message_id=(response or {}).get("result", {}).get("message_id"),
+                                      **tracking)
+                        if tracking:
+                            try:
+                                LEDGER.reconcile_trades(p["symbol"])
+                            except LedgerError:
+                                LOG.warning("Reconciliation deferred to the next candle")
                     break
                 except (HTTPError, URLError, TimeoutError) as exc:
                     action, delay = retry_policy("telegram", exc, attempt, p)
@@ -279,10 +306,25 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(payload)
 
     def do_GET(self):
-        if urlparse(self.path).path == "/health":
-            self.reply(200, {"ok": True, "ready": not missing_configuration(), "service": "fahad20-ai-lens"})
-        else:
-            self.reply(404, {"ok": False})
+        request = urlparse(self.path)
+        if request.path == "/health":
+            return self.reply(200, {"ok": True, "ready": not missing_configuration(),
+                                    "service": "fahad20-ai-lens", "outcome_tracking": DURABLE_ENABLED})
+        if request.path != "/stats":
+            return self.reply(404, {"ok": False})
+        header = self.headers.get("Authorization", "")
+        if not WEBHOOK_SECRET or not hmac.compare_digest(header.encode(), ("Bearer " + WEBHOOK_SECRET).encode()):
+            return self.reply(401, {"ok": False})
+        if not DURABLE_ENABLED:
+            return self.reply(503, {"ok": False, "message": "storage disabled"})
+        period = parse_qs(request.query).get("period", ["daily"])[0]
+        if period not in ("daily", "weekly"):
+            return self.reply(400, {"ok": False, "message": "period must be daily or weekly"})
+        try:
+            rows = LEDGER.trade_stats(period)
+        except LedgerError:
+            return self.reply(503, {"ok": False, "message": "storage unavailable"})
+        return self.reply(200, {"ok": True, "timezone": "America/New_York", "rows": rows})
 
     def do_POST(self):
         req = urlparse(self.path)
@@ -300,6 +342,13 @@ class Handler(BaseHTTPRequestHandler):
             packet = json.loads(self.rfile.read(size))
         except (ValueError, UnicodeError):
             return self.reply(400, {"ok": False})
+        if DURABLE_ENABLED:
+            batch = candle_batch(packet, ALLOWED_TICKERS)
+            if batch:
+                try:
+                    CANDLE_Q.put_nowait(batch)
+                except queue.Full:
+                    LOG.warning("Candle queue full; relying on TradingView backfill")
         reason = validate(packet)
         if reason:
             return self.reply(200, {"ok": True, "ignored": reason})
@@ -348,5 +397,7 @@ if __name__ == "__main__":
     if missing:
         LOG.warning("Service not ready; configure: %s", ", ".join(missing))
     threading.Thread(target=worker, daemon=True).start()
+    if DURABLE_ENABLED:
+        threading.Thread(target=candle_worker, daemon=True).start()
     LOG.info("Listening on port %d", PORT)
     ThreadingHTTPServer(("0.0.0.0", PORT), Handler).serve_forever()

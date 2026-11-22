@@ -34,11 +34,12 @@ class SignalLedger:
         url = self.url + "/rest/v1/signals_log" + query
         headers = {
             "apikey": self.secret,
-            "Authorization": "Bearer " + self.secret,
             "Accept-Profile": self.schema,
             "Content-Profile": self.schema,
             "Content-Type": "application/json",
         }
+        if not self.secret.startswith("sb_secret_"):
+            headers["Authorization"] = "Bearer " + self.secret
         if prefer:
             headers["Prefer"] = prefer
         data = None if payload is None else json.dumps(payload).encode("utf-8")

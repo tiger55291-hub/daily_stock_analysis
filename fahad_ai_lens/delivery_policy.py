@@ -1,4 +1,4 @@
-"""Pure V2 delivery policy. Not wired to the live receiver."""
+"""Retry and expiration rules for V2 signal delivery."""
 import hashlib
 import json
 from datetime import datetime, timedelta, timezone
@@ -34,14 +34,16 @@ def retry_policy(stage, error, attempt, packet, now=None):
     """
     if expired(packet, now):
         return ("expired_stale", None)
-    if stage == "telegram" and isinstance(error, (TimeoutError, URLError)):
-        return ("ambiguous_sent", None)
     if isinstance(error, HTTPError):
+        if stage == "telegram" and 500 <= error.code < 600:
+            return ("ambiguous_sent", None)
         retryable = error.code == 429 or 500 <= error.code < 600
-        if stage == "telegram" and error.code == 429:
-            retryable = True
+    elif isinstance(error, (TimeoutError, URLError)):
+        if stage == "telegram":
+            return ("ambiguous_sent", None)
+        retryable = True
     else:
-        retryable = stage != "telegram" and isinstance(error, (TimeoutError, URLError))
+        retryable = False
     if not retryable or attempt >= MAX_ATTEMPTS:
         return ("failed", None)
     return ("retry", RETRY_DELAYS_SECONDS[attempt - 1])

@@ -160,13 +160,13 @@ def ai_decision(p):
         "nearby price levels and reward/risk; choose WAIT if unconvincing. "
         "Confidence is strength of confluence, NOT a statistical probability of winning. "
         "Do not invent volume, option prices, gamma, IV or levels not in the packet. "
-        "Respond with one short Arabic reason."
+        "Respond with one Arabic reason of at most 25 words."
     )
-    payload = json.dumps(p, ensure_ascii=False)
+    payload = json.dumps({k: v for k, v in p.items() if k not in ("schema", "time", "timeframe")}, ensure_ascii=False, separators=(",", ":"))
     if MODEL_PROVIDER == "anthropic":
         request = {
             "model": ANTHROPIC_MODEL,
-            "max_tokens": 4096,
+            "max_tokens": 1024,
             "output_config": {"effort": "low"},
             "system": rules,
             "messages": [{"role": "user", "content": payload}],

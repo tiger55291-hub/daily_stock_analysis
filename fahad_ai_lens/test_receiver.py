@@ -1,7 +1,28 @@
 import unittest
 from datetime import datetime, timedelta, timezone
+from io import BytesIO
+from unittest.mock import patch
+from urllib.error import HTTPError
 
-from fahad_ai_lens.receiver import validate
+from fahad_ai_lens.receiver import failure_detail, probe_ai_review, validate
+
+
+class DiagnosticTests(unittest.TestCase):
+    @patch("fahad_ai_lens.receiver.MODEL_PROVIDER", "anthropic")
+    def test_credit_failure_logs_only_the_safe_classification(self):
+        response = BytesIO(b'{"error":{"type":"invalid_request_error","message":"Your credit balance is too low; hidden details"}}')
+        error = HTTPError("https://example.test/", 400, "Bad request", {}, response)
+        self.assertEqual(failure_detail("ai_review", error), "ai_review:HTTP400:insufficient_credits")
+
+    @patch("fahad_ai_lens.receiver.telegram_signal")
+    @patch("fahad_ai_lens.receiver.telegram_pilot")
+    @patch("fahad_ai_lens.receiver.ai_decision", return_value=None)
+    def test_probe_never_sends_to_telegram(self, review, pilot, signal):
+        with self.assertLogs("fahad20-ai-lens", level="INFO"):
+            probe_ai_review()
+        self.assertEqual(review.call_args.args[0]["event"], "HEALTH_CHECK")
+        pilot.assert_not_called()
+        signal.assert_not_called()
 
 
 def packet():

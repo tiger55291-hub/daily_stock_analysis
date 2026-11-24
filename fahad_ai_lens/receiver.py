@@ -71,6 +71,29 @@ def post_json(url, data, headers=None, timeout=16):
         return json.loads(response.read().decode("utf-8"))
 
 
+def failure_detail(stage, error):
+    if not isinstance(error, HTTPError):
+        return f"{stage}:{type(error).__name__}"
+    detail = f"{stage}:HTTP{error.code}"
+    if stage != "ai_review" or MODEL_PROVIDER != "anthropic":
+        return detail
+    try:
+        with error:
+            body = json.loads(error.read(8192))
+        info = body.get("error", {})
+        kind = info.get("type")
+        message = str(info.get("message", "")).lower()
+    except (OSError, ValueError, AttributeError):
+        return detail
+    if "credit balance is too low" in message or "insufficient credit" in message:
+        return f"{detail}:insufficient_credits"
+    if kind in ("invalid_request_error", "authentication_error", "permission_error",
+                "not_found_error", "rate_limit_error", "api_error", "overloaded_error",
+                "billing_error"):
+        return f"{detail}:{kind}"
+    return detail
+
+
 PILOT_EVENTS = {
     "LONG_RETEST_WATCH", "SHORT_RETEST_WATCH",
     "LONG_WAIT_RETEST", "SHORT_WAIT_RETEST",
@@ -176,6 +199,17 @@ def ai_decision(p):
     return out
 
 
+def probe_ai_review():
+    # Exercise the configured reviewer from Render without a market signal or Telegram send.
+    try:
+        ai_decision({"event": "HEALTH_CHECK", "purpose": "availability diagnostic"})
+    except Exception as error:
+        LOG.warning("AI review probe failed provider=%s detail=%s", MODEL_PROVIDER,
+                    failure_detail("ai_review", error))
+    else:
+        LOG.info("AI review probe passed provider=%s", MODEL_PROVIDER)
+
+
 def telegram_signal(p, ai):
     side = ai["decision"]
     price = p["trade"]
@@ -234,7 +268,7 @@ def worker():
         item = JOB_Q.get()
         p = item["packet"] if isinstance(item, dict) and "packet" in item else item
         sid = item.get("signal_id") if isinstance(item, dict) else None
-        stage = "claude"
+        stage = "ledger"
         try:
             if DURABLE_ENABLED and expired(p):
                 LEDGER.update(sid, status="expired_stale", processed_at=datetime.now(timezone.utc).isoformat())
@@ -243,6 +277,7 @@ def worker():
                 LEDGER.update(sid, status="processing")
             verdict = None
             if p["event"] not in PILOT_EVENTS:
+                stage = "ai_review"
                 for attempt in range(1, 4):
                     try:
                         verdict = ai_decision(p)
@@ -279,17 +314,20 @@ def worker():
                     break
                 except (HTTPError, URLError, TimeoutError) as exc:
                     action, delay = retry_policy("telegram", exc, attempt, p)
+                    detail = failure_detail(stage, exc)
+                    LOG.warning("Alert delivery error action=%s detail=%s", action, detail)
                     if DURABLE_ENABLED:
                         LEDGER.update(sid, status=action if action != "retry" else "processing",
-                                      attempts=attempt, last_error=type(exc).__name__)
+                                      attempts=attempt, last_error=detail)
                     if action != "retry":
                         break
                     time.sleep(delay or 0)
         except Exception as exc:
-            LOG.error("AI or Telegram failed (%s)", type(exc).__name__)
+            detail = failure_detail("ledger" if isinstance(exc, LedgerError) else stage, exc)
+            LOG.error("Alert processing failed provider=%s detail=%s", MODEL_PROVIDER, detail)
             if DURABLE_ENABLED and sid:
                 try:
-                    LEDGER.update(sid, status="failed", last_error=type(exc).__name__)
+                    LEDGER.update(sid, status="failed", last_error=detail)
                 except LedgerError:
                     LOG.error("Failed to persist signal failure")
         finally:
@@ -396,6 +434,8 @@ if __name__ == "__main__":
     missing = missing_configuration()
     if missing:
         LOG.warning("Service not ready; configure: %s", ", ".join(missing))
+    else:
+        threading.Thread(target=probe_ai_review, daemon=True).start()
     threading.Thread(target=worker, daemon=True).start()
     if DURABLE_ENABLED:
         threading.Thread(target=candle_worker, daemon=True).start()

@@ -14,13 +14,13 @@ from urllib.error import HTTPError, URLError
 try:
     from fahad_ai_lens.delivery_policy import signal_id, expired, retry_policy
     from fahad_ai_lens.durable_store import SignalLedger, LedgerError
-    from fahad_ai_lens.trade_outcomes import candle_batch, tracking_fields
+    from fahad_ai_lens.trade_outcomes import candle_batch, positive, stamp, tracking_fields
 except ModuleNotFoundError as exc:
     if exc.name != "fahad_ai_lens":
         raise
     from delivery_policy import signal_id, expired, retry_policy
     from durable_store import SignalLedger, LedgerError
-    from trade_outcomes import candle_batch, tracking_fields
+    from trade_outcomes import candle_batch, positive, stamp, tracking_fields
 import threading
 import urllib.request
 from collections import deque
@@ -53,6 +53,7 @@ NYSE_HOLIDAYS = {
 }
 NYSE_EARLY_CLOSES = {"2026-11-27", "2026-12-24", "2027-11-26", "2028-07-03", "2028-11-24"}
 JOB_Q = queue.Queue(maxsize=100)
+WATCH_Q = queue.Queue(maxsize=100)
 CANDLE_Q = queue.Queue(maxsize=512)
 DURABLE_ENABLED = os.getenv("DURABLE_ENABLED", "false").lower() == "true"
 LEDGER = SignalLedger() if DURABLE_ENABLED else None
@@ -104,7 +105,8 @@ def failure_detail(stage, error):
     return detail
 
 
-PILOT_EVENTS = {
+FAKEOUT_EVENTS = {"LONG_FAKEOUT_WATCH", "SHORT_FAKEOUT_WATCH"}
+PILOT_EVENTS = FAKEOUT_EVENTS | {
     "LONG_RETEST_WATCH", "SHORT_RETEST_WATCH",
     "LONG_WAIT_RETEST", "SHORT_WAIT_RETEST",
 }
@@ -144,6 +146,23 @@ def validate(p):
     ticker = str(p.get("symbol", "")).split(":")[-1].upper()
     if ticker not in ALLOWED_TICKERS:
         return "ticker not selected"
+    if pilot and event in FAKEOUT_EVENTS:
+        if p.get("symbol") != "CAPITALCOM:SPX500" or str(p.get("timeframe")) != "1":
+            return "fakeout watch requires CAPITALCOM:SPX500 1m"
+        context = p.get("fakeout")
+        if not isinstance(context, dict) or not all(
+            positive(context.get(key)) for key in ("level", "extreme", "close")
+        ):
+            return "invalid fakeout prices"
+        rsi, reference_rsi = (context.get(key) for key in ("rsi", "reference_rsi"))
+        if not all(type(value) in (int, float) and 0 <= value <= 100 for value in (rsi, reference_rsi)):
+            return "invalid fakeout RSI"
+        level, extreme, close = (context[key] for key in ("level", "extreme", "close"))
+        valid = (extreme < level < close and rsi > reference_rsi if event.startswith("LONG_")
+                 else close < level < extreme and rsi < reference_rsi)
+        if not valid or stamp(p.get("time")) is None:
+            return "invalid fakeout watch"
+        return validate_candle_time(p)
     if str(p.get("timeframe")) != TIMEFRAME:
         return "timeframe mismatch"
     if pilot:
@@ -253,18 +272,23 @@ def telegram_signal(p, ai):
 
 def telegram_pilot(p):
     event = p["event"]
-    context = p["retest"]
     side = "CALL" if event.startswith("LONG_") else "PUT"
-    if event.endswith("_WATCH"):
+    if event in FAKEOUT_EVENTS:
+        context = p["fakeout"]
+        pattern = "كسر كاذب" if side == "CALL" else "اختراق كاذب"
+        status = f"مراقبة {side} | {pattern} + ديفرجنس\nالمستوى {context['level']:g} | إغلاق {context['close']:g}"
+    elif event.endswith("_WATCH"):
+        context = p["retest"]
         status = f"مراقبة {side} | إعادة اختبار {context['level']}"
     else:
+        context = p["retest"]
         reasons = []
         if context.get("extended") is True:
             reasons.append("امتداد السعر عن مستوى الكسر")
         if context.get("crowded") is True:
             reasons.append("مستوى قريب في مسار الهدف")
         status = f"انتظار إعادة اختبار {side} | " + "، ".join(reasons)
-    msg = f"FAHAD20 | SPX500 5m\n{status}\nشمعة: {p['time']} UTC"
+    msg = f"FAHAD20 | SPX500 {p['timeframe']}m\n{status}\nشمعة: {p['time']} UTC"
     url = "https://api.telegram.org/bot" + BOT_TOKEN + "/sendMessage"
     return post_json(url, {"chat_id": CHAT_ID, "text": msg}, timeout=12)
 
@@ -286,9 +310,9 @@ def candle_worker():
             CANDLE_Q.task_done()
 
 
-def worker():
+def worker(jobs=JOB_Q):
     while True:
-        item = JOB_Q.get()
+        item = jobs.get()
         p = item["packet"] if isinstance(item, dict) and "packet" in item else item
         sid = item.get("signal_id") if isinstance(item, dict) else None
         stage = "ledger"
@@ -354,7 +378,7 @@ def worker():
                 except LedgerError:
                     LOG.error("Failed to persist signal failure")
         finally:
-            JOB_Q.task_done()
+            jobs.task_done()
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -415,9 +439,10 @@ class Handler(BaseHTTPRequestHandler):
             return self.reply(200, {"ok": True, "ignored": reason})
         if NEW_YORK_SESSION_ONLY and not within_new_york_session(packet):
             return self.reply(200, {"ok": True, "ignored": "outside New York session"})
+        jobs = WATCH_Q if packet["event"] in FAKEOUT_EVENTS else JOB_Q
         if DURABLE_ENABLED:
             sid = signal_id(packet)
-            if JOB_Q.full():
+            if jobs.full():
                 return self.reply(503, {"ok": False, "message": "queue full"})
             row = {"signal_id": sid, "symbol": packet["symbol"],
                    "timeframe": str(packet["timeframe"]), "candle_time": packet["time"],
@@ -428,7 +453,7 @@ class Handler(BaseHTTPRequestHandler):
                 inserted = LEDGER.insert(row)
                 if not inserted:
                     return self.reply(200, {"ok": True, "ignored": "duplicate"})
-                JOB_Q.put_nowait({"packet": packet, "signal_id": sid})
+                jobs.put_nowait({"packet": packet, "signal_id": sid})
             except LedgerError:
                 LOG.error("Supabase unavailable; packet not accepted")
                 return self.reply(503, {"ok": False, "message": "storage unavailable"})
@@ -441,7 +466,7 @@ class Handler(BaseHTTPRequestHandler):
             if identity in SEEN:
                 return self.reply(200, {"ok": True, "ignored": "duplicate"})
             try:
-                JOB_Q.put_nowait(packet)
+                jobs.put_nowait(packet)
             except queue.Full:
                 return self.reply(503, {"ok": False, "message": "queue full"})
             SEEN.add(identity)
@@ -462,6 +487,7 @@ if __name__ == "__main__":
     else:
         threading.Thread(target=probe_ai_review, daemon=True).start()
     threading.Thread(target=worker, daemon=True).start()
+    threading.Thread(target=worker, args=(WATCH_Q,), daemon=True).start()
     if DURABLE_ENABLED:
         threading.Thread(target=candle_worker, daemon=True).start()
     LOG.info("Listening on port %d", PORT)

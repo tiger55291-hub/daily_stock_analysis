@@ -15,6 +15,22 @@ This is the replacement plan for the **analysis output** of `@Fahad20AnalysisBot
 5. Under Notifications enable **Webhook URL**: `https://YOUR-RENDER-URL/webhook?token=YOUR_WEBHOOK_SECRET`. Leave the message field unchanged. TradingView's script sends JSON at candle close. Keep two-factor authentication enabled in TradingView.
 6. The receiver only forwards fresh **LONG_SETUP / SHORT_SETUP** events when score >=80, 15-minute direction agrees, and regime is not a range. High-volatility setups require score >=85 with aligned higher-timeframe direction. The model can still choose WAIT. Each accepted packet can produce at most one telegram signal per server session.
 
+## SPX500 one-minute fakeout watch
+
+Add `spx500-fakeout-watch.pine` as a separate private indicator on standard
+`CAPITALCOM:SPX500` one-minute candles. Create a separate **Any alert() function
+call** alert with the same webhook destination. Keep the existing five-minute
+alerts running.
+
+The watch compares one-minute RSI(14) at the confirmed five-minute swing
+price with RSI at the new price extreme. It fires on the first one-minute
+close back through the reference, within five minutes of the breach. A lower
+RSI at a higher price produces a PUT watch. A higher RSI at a lower price
+produces a CALL watch. The receiver applies the configured New York session
+filter and sends directly to Telegram. Durable mode records watch delivery
+in the signal ledger. Watches do not enter trade stats or five-minute candle
+history.
+
 ## Hosting (separate Render web service)
 Use a new **Python** web service connected to the repository and branch `experiment/fahad20-ai-lens`:
 - Build command: `true` (Python standard library only)

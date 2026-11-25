@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+- [新功能] FAHAD20 AI Lens adds a standalone one-minute SPX500 fakeout and RSI divergence watch.
+
 - [新功能] FAHAD20 AI Lens records 5-minute T1 and stop outcomes and exposes authenticated daily and weekly statistics.
 
 - [改进] Fahad fork Actions now supports a compact Arabic US watchlist digest with separate completed-candle momentum horizons, timestamped audit snapshots and explicit missing-data handling.

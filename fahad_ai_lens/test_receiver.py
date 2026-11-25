@@ -4,7 +4,27 @@ from io import BytesIO
 from unittest.mock import patch
 from urllib.error import HTTPError
 
-from fahad_ai_lens.receiver import failure_detail, probe_ai_review, validate
+from fahad_ai_lens.receiver import failure_detail, probe_ai_review, validate, within_new_york_session
+
+
+class NewYorkSessionTests(unittest.TestCase):
+    def test_regular_session_uses_candle_close_and_new_york_dst(self):
+        for timestamp, expected in [
+            ("2026-11-25T14:30:00Z", False),
+            ("2026-11-25T14:35:00Z", True),
+            ("2026-11-25T21:00:00Z", True),
+            ("2026-11-25T21:05:00Z", False),
+            ("2026-07-06T13:35:00Z", True),
+            ("2026-07-06T20:05:00Z", False),
+        ]:
+            with self.subTest(timestamp=timestamp):
+                self.assertEqual(within_new_york_session({"time": timestamp}), expected)
+
+    def test_thanksgiving_early_close_and_weekend(self):
+        self.assertFalse(within_new_york_session({"time": "2026-11-26T16:00:00Z"}))
+        self.assertTrue(within_new_york_session({"time": "2026-11-27T18:00:00Z"}))
+        self.assertFalse(within_new_york_session({"time": "2026-11-27T18:05:00Z"}))
+        self.assertFalse(within_new_york_session({"time": "2026-11-28T16:00:00Z"}))
 
 
 class DiagnosticTests(unittest.TestCase):

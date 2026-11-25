@@ -27,6 +27,7 @@ from collections import deque
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
+from zoneinfo import ZoneInfo
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 LOG = logging.getLogger("fahad20-ai-lens")
@@ -42,6 +43,15 @@ GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
 MIN_SCORE = int(os.getenv("MIN_SCORE", "80"))
 TIMEFRAME = os.getenv("TIMEFRAME", "5")
 ALLOWED_TICKERS = {s.strip().upper() for s in os.getenv("ALLOWED_TICKERS", "SPX,SPX500").split(",") if s.strip()}
+NEW_YORK_SESSION_ONLY = os.getenv("NEW_YORK_SESSION_ONLY", "false").lower() == "true"
+NEW_YORK = ZoneInfo("America/New_York")
+# NYSE published cash-market exceptions: https://www.nyse.com/trade/hours-calendars
+NYSE_HOLIDAYS = {
+    2026: {"01-01", "01-19", "02-16", "04-03", "05-25", "06-19", "07-03", "09-07", "11-26", "12-25"},
+    2027: {"01-01", "01-18", "02-15", "03-26", "05-31", "06-18", "07-05", "09-06", "11-25", "12-24"},
+    2028: {"01-17", "02-21", "04-14", "05-29", "06-19", "07-04", "09-04", "11-23", "12-25"},
+}
+NYSE_EARLY_CLOSES = {"2026-11-27", "2026-12-24", "2027-11-26", "2028-07-03", "2028-11-24"}
 JOB_Q = queue.Queue(maxsize=100)
 CANDLE_Q = queue.Queue(maxsize=512)
 DURABLE_ENABLED = os.getenv("DURABLE_ENABLED", "false").lower() == "true"
@@ -109,6 +119,19 @@ def validate_candle_time(p):
     except (KeyError, AttributeError, ValueError, TypeError):
         return "invalid candle time"
     return None
+
+
+def within_new_york_session(packet):
+    close = datetime.fromisoformat(packet["time"].replace("Z", "+00:00"))
+    if close.tzinfo is None:
+        return False
+    local = close.astimezone(NEW_YORK)
+    if local.weekday() >= 5 or local.strftime("%m-%d") in NYSE_HOLIDAYS.get(local.year, ()):
+        return False
+    end_hour = 13 if local.date().isoformat() in NYSE_EARLY_CLOSES else 16
+    return local.replace(hour=9, minute=30, second=0, microsecond=0) < local <= local.replace(
+        hour=end_hour, minute=0, second=0, microsecond=0
+    )
 
 
 def validate(p):
@@ -390,6 +413,8 @@ class Handler(BaseHTTPRequestHandler):
         reason = validate(packet)
         if reason:
             return self.reply(200, {"ok": True, "ignored": reason})
+        if NEW_YORK_SESSION_ONLY and not within_new_york_session(packet):
+            return self.reply(200, {"ok": True, "ignored": "outside New York session"})
         if DURABLE_ENABLED:
             sid = signal_id(packet)
             if JOB_Q.full():
@@ -440,4 +465,6 @@ if __name__ == "__main__":
     if DURABLE_ENABLED:
         threading.Thread(target=candle_worker, daemon=True).start()
     LOG.info("Listening on port %d", PORT)
+    LOG.info("Alert scope tickers=%s new_york_session_only=%s",
+             ",".join(sorted(ALLOWED_TICKERS)), NEW_YORK_SESSION_ONLY)
     ThreadingHTTPServer(("0.0.0.0", PORT), Handler).serve_forever()

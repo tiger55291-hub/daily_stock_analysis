@@ -1,5 +1,5 @@
 //@version=6
-indicator("FAHAD SPX500 Fakeout Watch", shorttitle = "FAHAD Fakeout", overlay = true, max_bars_back = 150)
+indicator("FAHAD SPX500 Fakeout Watch", shorttitle = "FAHAD Fakeout", overlay = true, max_bars_back = 150, max_labels_count = 200)
 
 bool supportedChart = ticker.standard(syminfo.tickerid) == "CAPITALCOM:SPX500" and timeframe.isminutes and timeframe.multiplier == 1 and chart.is_standard
 int pivotStrength = 2
@@ -58,7 +58,7 @@ method check(Sweep self, bool isHigh) =>
                 watch := diverged and time_close - self.startedAt <= sweepWindowMs
     watch
 
-sendWatch(Sweep sweep, string event) =>
+watchPacket(Sweep sweep, string event) =>
     string packet = '{"schema":"ai-agent-lens/v1","symbol":"CAPITALCOM:SPX500","timeframe":"1"'
     packet += ',"event":"' + event + '","time":"' + str.format_time(time_close, "yyyy-MM-dd'T'HH:mm:ss'Z'", "UTC") + '"'
     packet += ',"fakeout":{"level":' + str.tostring(sweep.level, format.mintick)
@@ -66,12 +66,13 @@ sendWatch(Sweep sweep, string event) =>
     packet += ',"close":' + str.tostring(close, format.mintick)
     packet += ',"rsi":' + str.tostring(sweep.extremeRsi, "0.########")
     packet += ',"reference_rsi":' + str.tostring(sweep.reference, "0.########") + '}}'
-    alert(packet, alert.freq_once_per_bar_close)
+    packet
 
 var Sweep upper = Sweep.new()
 var Sweep lower = Sweep.new()
 bool putWatch = false
 bool callWatch = false
+string alertPacket = ""
 
 if supportedChart and barstate.isconfirmed
     if not na(pivotHigh) and pivotTime != pivotTime[1]
@@ -86,14 +87,19 @@ if supportedChart and barstate.isconfirmed
         putWatch := false
         callWatch := false
     if putWatch
-        sendWatch(upper, "SHORT_FAKEOUT_WATCH")
+        alertPacket := watchPacket(upper, "SHORT_FAKEOUT_WATCH")
     if callWatch
-        sendWatch(lower, "LONG_FAKEOUT_WATCH")
+        alertPacket := watchPacket(lower, "LONG_FAKEOUT_WATCH")
 
     if close < upper.level
         upper.clear()
     if close > lower.level
         lower.clear()
 
-plotshape(putWatch, "PUT watch", shape.triangledown, location.abovebar, color.red, size = size.tiny)
-plotshape(callWatch, "CALL watch", shape.triangleup, location.belowbar, color.lime, size = size.tiny)
+if alertPacket != ""
+    alert(alertPacket, alert.freq_once_per_bar_close)
+
+if putWatch
+    label.new(bar_index, high, style = label.style_triangledown, yloc = yloc.abovebar, color = color.red, size = size.tiny)
+if callWatch
+    label.new(bar_index, low, style = label.style_triangleup, yloc = yloc.belowbar, color = color.lime, size = size.tiny)

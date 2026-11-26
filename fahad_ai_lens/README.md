@@ -111,3 +111,27 @@ by symbol, pattern and CALL/PUT. Observation uses up to 60 consecutive full
 one-minute candles after Telegram delivery. SL takes precedence when both
 levels are touched in one candle. Missing data are marked incomplete after
 the backfill window. Win rate uses wins plus losses as the denominator.
+
+## OpenAI opening-range pilot
+
+Uses the same validated SPX500 1-minute candle stream as Gemini and a separate
+review queue and ledger. Keep the existing TradingView alert. Apply
+`opening_range_outcomes.sql` after the Gemini migration and configure
+`OPENAI_API_KEY` as a Render secret before setting `OPENAI_ORB_ENABLED=true`.
+The model can be configured with `OPENAI_ORB_MODEL`.
+
+The regular New York session's first 15 closed minutes define the range.
+Only the first close strictly beyond each side qualifies for evaluation.
+The breakout candle must have a directional body of at least half its range
+and close within the leading quarter. Missing minutes block evaluation until
+backfilled. A close on the boundary does not count as a breakout.
+
+The baseline enters notionally at the signal close, sets SL 0.1 points
+beyond the other end of the signal candle and T1 at 1.5 times the SL distance.
+Record all qualifying candidates before AI review. A matching OpenAI WATCH
+sends a labeled monitoring alert to the existing Telegram chat. Outcomes
+use the next 60 consecutive 1-minute candles with SL taking priority on a
+dual hit. The stats separately count a close back inside the range within
+five minutes and expose missing-data cases. Use the existing bearer auth
+with `/stats/openai?period=daily` or `?period=weekly`. Review after 10 observed
+sessions using these baseline counts and the subset sent to Telegram.

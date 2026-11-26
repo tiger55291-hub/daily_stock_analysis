@@ -12,7 +12,7 @@ import hashlib
 import time
 from urllib.error import HTTPError, URLError
 try:
-    from fahad_ai_lens import gemini_lens
+    from fahad_ai_lens import gemini_lens, opening_range
     from fahad_ai_lens.delivery_policy import signal_id, expired, retry_policy
     from fahad_ai_lens.durable_store import SignalLedger, LedgerError
     from fahad_ai_lens.trade_outcomes import candle_batch, positive, stamp, tracking_fields
@@ -20,6 +20,7 @@ except ModuleNotFoundError as exc:
     if exc.name != "fahad_ai_lens":
         raise
     import gemini_lens
+    import opening_range
     from delivery_policy import signal_id, expired, retry_policy
     from durable_store import SignalLedger, LedgerError
     from trade_outcomes import candle_batch, positive, stamp, tracking_fields
@@ -63,6 +64,10 @@ GEMINI_LENS_ENABLED = os.getenv("GEMINI_LENS_ENABLED", "false").lower() == "true
 GEMINI_LENS_MODEL = os.getenv("GEMINI_LENS_MODEL", GEMINI_MODEL)
 GEMINI_JOBS = queue.Queue(maxsize=100)
 GEMINI_CANDLES = queue.Queue(maxsize=120)
+OPENAI_ORB_ENABLED = os.getenv("OPENAI_ORB_ENABLED", "false").lower() == "true"
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
+OPENAI_ORB_MODEL = os.getenv("OPENAI_ORB_MODEL", "gpt-5-mini")
+ORB_CANDLES = queue.Queue(maxsize=30)
 
 
 def missing_configuration():
@@ -450,10 +455,71 @@ def gemini_candle_worker():
         bars = GEMINI_CANDLES.get()
         try:
             LEDGER.record_gemini_candles(bars)
+            if orb_ready():
+                try:
+                    ORB_CANDLES.put_nowait(max(bar["closed_at"] for bar in bars))
+                except queue.Full:
+                    LOG.warning("Opening-range queue full")
         except LedgerError:
             LOG.warning("Gemini candle storage failed; awaiting next candle backfill")
         finally:
             GEMINI_CANDLES.task_done()
+
+
+def orb_ready():
+    return bool(OPENAI_ORB_ENABLED and OPENAI_API_KEY and gemini_ready())
+
+
+def process_orb_candle(closed_at):
+    LEDGER.reconcile_orb()
+    if not within_new_york_session({"time": closed_at}):
+        return
+    closed = stamp(closed_at).astimezone(NEW_YORK)
+    opened = closed.replace(hour=9, minute=30, second=0, microsecond=0)
+    if closed <= opened + 15 * opening_range.MINUTE:
+        return
+    setup = opening_range.candidate(LEDGER.opening_range_bars(opened, closed), opened, closed)
+    if not setup:
+        return
+    row = {key: value for key, value in setup.items() if key != "candle"}
+    if not LEDGER.insert_orb(row):
+        return
+    event = {"time": setup["candle_time"]}
+    if expired(event):
+        LEDGER.update_orb(setup, review_status="expired")
+        return
+    try:
+        decision, reason = opening_range.review(setup, post_json, OPENAI_ORB_MODEL, OPENAI_API_KEY)
+    except Exception as error:
+        LOG.warning("OpenAI opening-range review failed: %s", failure_detail("orb_review", error))
+        LEDGER.update_orb(setup, review_status="review_failed")
+        return
+    if decision == "WAIT" or expired(event):
+        LEDGER.update_orb(setup, review_status="wait" if decision == "WAIT" else "expired")
+        return
+    text = (f"FAHAD20 | OpenAI | SPX500 1m\nمراقبة {setup['side']} | اختراق نطاق الافتتاح\n"
+            f"إغلاق {setup['entry']:g} | SL {setup['stop']:g} | T1 {setup['target']:g}\n"
+            f"{reason}\n{setup['candle_time']} | تجريبي")
+    try:
+        response = post_json("https://api.telegram.org/bot" + BOT_TOKEN + "/sendMessage",
+                             {"chat_id": CHAT_ID, "text": text}, timeout=12)
+    except (HTTPError, URLError, TimeoutError) as error:
+        LOG.warning("Opening-range Telegram delivery uncertain: %s", failure_detail("orb_send", error))
+        LEDGER.update_orb(setup, review_status="delivery_unconfirmed")
+        return
+    delivered = response.get("ok") is True and type(response.get("result", {}).get("message_id")) is int
+    LEDGER.update_orb(setup, review_status="sent" if delivered else "delivery_unconfirmed")
+
+
+def orb_worker():
+    while True:
+        closed_at = ORB_CANDLES.get()
+        try:
+            process_orb_candle(closed_at)
+        except Exception as error:
+            LOG.warning("Opening-range pipeline failed: %s", type(error).__name__)
+        finally:
+            ORB_CANDLES.task_done()
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -470,7 +536,7 @@ class Handler(BaseHTTPRequestHandler):
         if request.path == "/health":
             return self.reply(200, {"ok": True, "ready": not missing_configuration(),
                                     "service": "fahad20-ai-lens", "outcome_tracking": DURABLE_ENABLED})
-        if request.path not in ("/stats", "/stats/gemini"):
+        if request.path not in ("/stats", "/stats/gemini", "/stats/openai"):
             return self.reply(404, {"ok": False})
         header = self.headers.get("Authorization", "")
         if not WEBHOOK_SECRET or not hmac.compare_digest(header.encode(), ("Bearer " + WEBHOOK_SECRET).encode()):
@@ -483,6 +549,8 @@ class Handler(BaseHTTPRequestHandler):
         try:
             if request.path == "/stats/gemini":
                 rows = LEDGER.gemini_stats(period)
+            elif request.path == "/stats/openai":
+                rows = LEDGER.orb_stats(period)
             else:
                 rows = LEDGER.trade_stats(period)
         except LedgerError:
@@ -586,6 +654,8 @@ if __name__ == "__main__":
         threading.Thread(target=gemini_worker, daemon=True).start()
         threading.Thread(target=gemini_candle_worker, daemon=True).start()
         threading.Thread(target=probe_gemini_lane, daemon=True).start()
+    if orb_ready():
+        threading.Thread(target=orb_worker, daemon=True).start()
     LOG.info("Listening on port %d", PORT)
     LOG.info("Alert scope tickers=%s new_york_session_only=%s",
              ",".join(sorted(ALLOWED_TICKERS)), NEW_YORK_SESSION_ONLY)

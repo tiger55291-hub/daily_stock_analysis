@@ -114,3 +114,26 @@ class SignalLedger:
     def gemini_stats(self, period):
         query = "?period=eq." + period + "&order=period_start.desc,symbol,pattern,side&limit=300"
         return self._request("GET", query, resource="lens_gemini_stats") or []
+
+    def opening_range_bars(self, opened, closed):
+        query = urllib.parse.urlencode([
+            ("closed_at", "gt." + opened.isoformat()), ("closed_at", "lte." + closed.isoformat()),
+            ("order", "closed_at.asc"), ("limit", 390),
+        ])
+        return self._request("GET", "?" + query, resource="lens_gemini_candles_1m") or []
+
+    def insert_orb(self, row):
+        return bool(self._request("POST", "?on_conflict=session_date,side", row,
+                                  prefer="resolution=ignore-duplicates,return=representation",
+                                  resource="lens_openai_orb"))
+
+    def update_orb(self, setup, **changes):
+        query = urllib.parse.urlencode({k: "eq." + setup[k] for k in ("session_date", "side")})
+        self._request("PATCH", "?" + query, changes, prefer="return=minimal", resource="lens_openai_orb")
+
+    def reconcile_orb(self):
+        self._request("POST", payload={}, resource="rpc/reconcile_lens_openai_orb")
+
+    def orb_stats(self, period):
+        query = "?period=eq." + period + "&order=period_start.desc,side&limit=300"
+        return self._request("GET", query, resource="lens_openai_orb_stats") or []

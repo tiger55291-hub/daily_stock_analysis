@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+- [新功能] Add a separate OpenAI SPX500 opening-range monitoring pilot.
+
 - [新功能] Add optional parallel Gemini reviews, one-minute SPX500 candle tracking, and separate strategy statistics to FAHAD20 AI Lens.
 
 - [新功能] FAHAD20 AI Lens adds a standalone one-minute SPX500 fakeout and RSI divergence watch.

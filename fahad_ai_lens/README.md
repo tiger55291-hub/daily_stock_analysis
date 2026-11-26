@@ -42,7 +42,7 @@ Use a new **Python** web service connected to the repository and branch `experim
   - `TELEGRAM_CHAT_ID` = destination chat ID; the bot must be allowed to message it
   - `MODEL_PROVIDER` = `anthropic` by default, or `gemini`
   - `ANTHROPIC_API_KEY` = Anthropic Claude API key (for `MODEL_PROVIDER=anthropic`)
-  - `GEMINI_API_KEY` = Gemini API key (only for `MODEL_PROVIDER=gemini`)
+  - `GEMINI_API_KEY` = Gemini API key (for the optional Gemini lane or `MODEL_PROVIDER=gemini`)
   - Optional `ANTHROPIC_MODEL` (default `claude-fable-5-2`), `GEMINI_MODEL` (default `gemini-2.5-flash`), `MIN_SCORE` (default `80`), `TIMEFRAME` (default `5`), `ALLOWED_TICKERS` (default `SPX,SPX500`)
   
 Once deployed, verify `GET /health` shows `ready: true`, then use a test TradingView alert to verify webhook delivery and bot messaging. With missing secrets, the server safely reports `ready: false` and returns HTTP 503 to all webhook POSTs.
@@ -78,3 +78,36 @@ the outcome open pending sufficient data. Older alerts can record consecutive
 buckets for the selected period, grouped by New York signal date, exact symbol
 and CALL/PUT. Send `Authorization: Bearer <WEBHOOK_SECRET>` in the request. The
 private Supabase view `lens_trade_stats` also contains the saved aggregates.
+
+## Parallel Gemini lane (experimental)
+
+Keep `MODEL_PROVIDER=anthropic` and the existing Claude settings. Gemini is
+off by default. To enable it, first apply `gemini_outcomes.sql` in Supabase,
+configure `GEMINI_API_KEY` in Render, and set `GEMINI_LENS_ENABLED=true`.
+`GEMINI_LENS_MODEL` can override the configured Gemini model for this lane.
+Durable storage must be enabled.
+
+Use the separate `spx500-gemini-candles.pine` indicator on standard
+`CAPITALCOM:SPX500` one-minute candles. Select **Any alert() function call**
+and point the new alert at `/webhook/gemini` with the existing webhook
+credential. The indicator sends closed candles during New York hours and
+for one hour after the regular close. Enter up to 10 comma-separated numeric
+centers in the **SPX500** feed's price units. An empty input tracks candles
+and skips gamma bounces. Update the alert's saved indicator settings when
+changing the centers.
+
+The original Fakeout watch keeps sending its monitoring message. An
+independent queue sends the detected pattern to Gemini for a second,
+explicitly labeled alert if Gemini approves. For a center bounce, a full
+prior minute must stay on the approach side, then the next candle must
+touch the level and close back on the approach side with a directional
+body. The closest qualifying center is used. The experimental stop is
+0.1 points beyond the excursion and T1 is 1.5 times initial price risk.
+Only approvals matching the detected direction are sent to Telegram.
+
+Use the same bearer authorization as for `/stats` with
+`/stats/gemini?period=daily` or `?period=weekly`. Gemini results are grouped
+by symbol, pattern and CALL/PUT. Observation uses up to 60 consecutive full
+one-minute candles after Telegram delivery. SL takes precedence when both
+levels are touched in one candle. Missing data are marked incomplete after
+the backfill window. Win rate uses wins plus losses as the denominator.

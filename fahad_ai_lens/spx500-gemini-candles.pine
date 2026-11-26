@@ -1,0 +1,33 @@
+//@version=6
+indicator("FAHAD SPX500 Gemini candles", overlay = true, max_bars_back = 20)
+
+string centers = input.string("", "SPX500 gamma centers, separated by commas",
+    tooltip = "Enter levels for CAPITALCOM:SPX500. Leave empty to send candles only.")
+bool supportedChart = (ticker.standard(syminfo.tickerid) == "CAPITALCOM:SPX500" and
+    timeframe.isminutes and timeframe.multiplier == 1 and chart.is_standard)
+bool recordingHours = not na(time("1", "0930-1700:23456", "America/New_York"))
+
+formatTime(int timestamp) =>
+    str.format_time(timestamp, "yyyy-MM-dd'T'HH:mm:ss'Z'", "UTC")
+
+formatPrice(float value) =>
+    str.tostring(value, format.mintick)
+
+if supportedChart and recordingHours and barstate.isconfirmed
+    string bars = ""
+    for i = 0 to 9
+        if not na(time_close[i])
+            bars += ((bars == "" ? "" : ",") + '{"time":"' + formatTime(time_close[i]) +
+                '","open":' + formatPrice(open[i]) + ',"high":' + formatPrice(high[i]) +
+                ',"low":' + formatPrice(low[i]) + ',"close":' + formatPrice(close[i]) + '}')
+
+    string levels = ""
+    array<string> parts = str.split(centers, ",")
+    for i = 0 to math.min(array.size(parts), 10) - 1
+        float price = str.tonumber(str.trim(array.get(parts, i)))
+        if not na(price) and price > 0
+            levels += (levels == "" ? "" : ",") + formatPrice(price)
+
+    string packet = ('{"schema":"fahad-gemini-candles/v1","symbol":"CAPITALCOM:SPX500","time":"' +
+        formatTime(time_close) + '","bars":[' + bars + '],"levels":[' + levels + ']}')
+    alert(packet, alert.freq_once_per_bar_close)

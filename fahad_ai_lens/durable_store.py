@@ -91,3 +91,26 @@ class SignalLedger:
         # The receiver accepts only these two constant periods.
         query = "?period=eq." + period + "&order=period_start.desc,symbol,side&limit=300"
         return self._request("GET", query, resource="lens_trade_stats") or []
+
+    def insert_gemini(self, row):
+        rows = self._request("POST", "?on_conflict=signal_id", row,
+                             prefer="resolution=ignore-duplicates,return=representation",
+                             resource="lens_gemini_signals")
+        return bool(rows)
+
+    def update_gemini(self, signal_id, **changes):
+        query = "?signal_id=eq." + urllib.parse.quote(signal_id, safe="")
+        self._request("PATCH", query, changes, prefer="return=minimal", resource="lens_gemini_signals")
+
+    def record_gemini_candles(self, bars):
+        self._request("POST", "?on_conflict=closed_at", bars,
+                      prefer="resolution=ignore-duplicates,return=minimal",
+                      resource="lens_gemini_candles_1m")
+        self.reconcile_gemini()
+
+    def reconcile_gemini(self):
+        self._request("POST", payload={}, resource="rpc/reconcile_lens_gemini")
+
+    def gemini_stats(self, period):
+        query = "?period=eq." + period + "&order=period_start.desc,symbol,pattern,side&limit=300"
+        return self._request("GET", query, resource="lens_gemini_stats") or []

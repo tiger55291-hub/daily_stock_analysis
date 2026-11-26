@@ -12,12 +12,14 @@ import hashlib
 import time
 from urllib.error import HTTPError, URLError
 try:
+    from fahad_ai_lens import gemini_lens
     from fahad_ai_lens.delivery_policy import signal_id, expired, retry_policy
     from fahad_ai_lens.durable_store import SignalLedger, LedgerError
     from fahad_ai_lens.trade_outcomes import candle_batch, positive, stamp, tracking_fields
 except ModuleNotFoundError as exc:
     if exc.name != "fahad_ai_lens":
         raise
+    import gemini_lens
     from delivery_policy import signal_id, expired, retry_policy
     from durable_store import SignalLedger, LedgerError
     from trade_outcomes import candle_batch, positive, stamp, tracking_fields
@@ -57,6 +59,10 @@ WATCH_Q = queue.Queue(maxsize=100)
 CANDLE_Q = queue.Queue(maxsize=512)
 DURABLE_ENABLED = os.getenv("DURABLE_ENABLED", "false").lower() == "true"
 LEDGER = SignalLedger() if DURABLE_ENABLED else None
+GEMINI_LENS_ENABLED = os.getenv("GEMINI_LENS_ENABLED", "false").lower() == "true"
+GEMINI_LENS_MODEL = os.getenv("GEMINI_LENS_MODEL", GEMINI_MODEL)
+GEMINI_JOBS = queue.Queue(maxsize=100)
+GEMINI_CANDLES = queue.Queue(maxsize=120)
 
 
 def missing_configuration():
@@ -381,6 +387,75 @@ def worker(jobs=JOB_Q):
             jobs.task_done()
 
 
+def gemini_ready():
+    return bool(GEMINI_LENS_ENABLED and LEDGER and GEMINI_API_KEY and WEBHOOK_SECRET and BOT_TOKEN and CHAT_ID)
+
+
+def queue_gemini(candidate):
+    if candidate:
+        try:
+            GEMINI_JOBS.put_nowait(candidate)
+        except queue.Full:
+            LOG.warning("Gemini review queue full")
+
+
+def telegram_gemini(candidate, reason):
+    pattern = "ارتداد مركز قاما" if candidate["pattern"] == "GAMMA_BOUNCE" else "اختراق كاذب مع ديفرجنس"
+    text = (f"FAHAD20 | Gemini | SPX500 1m\n{candidate['side']} | {pattern}\n"
+            f"المستوى {candidate['context']['level']:g} | إغلاق {candidate['entry']:g}\n"
+            f"SL {candidate['stop']:g} | T1 {candidate['target']:g}\n"
+            f"{reason}\n{candidate['time']} | تجريبي")
+    return post_json("https://api.telegram.org/bot" + BOT_TOKEN + "/sendMessage",
+                     {"chat_id": CHAT_ID, "text": text}, timeout=12)
+
+
+def gemini_worker():
+    def reviewer(candidate):
+        return gemini_lens.review(candidate, post_json, GEMINI_LENS_MODEL, GEMINI_API_KEY)
+
+    while True:
+        candidate = GEMINI_JOBS.get()
+        try:
+            gemini_lens.review_and_deliver(candidate, LEDGER, reviewer, telegram_gemini)
+        except Exception as error:
+            LOG.error("Gemini review pipeline failed: %s", type(error).__name__)
+        finally:
+            GEMINI_JOBS.task_done()
+
+
+def probe_gemini_lane():
+    try:
+        LEDGER.gemini_stats("daily")
+    except LedgerError:
+        LOG.warning("Gemini lane storage probe failed")
+    else:
+        LOG.info("Gemini lane storage probe passed")
+    try:
+        reason = gemini_lens.review(
+            {"pattern": "HEALTH_CHECK", "side": "WAIT"}, post_json,
+            GEMINI_LENS_MODEL, GEMINI_API_KEY,
+        )
+    except Exception as error:
+        detail = f"HTTP{error.code}" if isinstance(error, HTTPError) else type(error).__name__
+        LOG.warning("Gemini review probe failed model=%s detail=%s", GEMINI_LENS_MODEL, detail)
+    else:
+        if reason:
+            LOG.info("Gemini review probe passed model=%s", GEMINI_LENS_MODEL)
+        else:
+            LOG.warning("Gemini review probe returned an invalid verdict model=%s", GEMINI_LENS_MODEL)
+
+
+def gemini_candle_worker():
+    while True:
+        bars = GEMINI_CANDLES.get()
+        try:
+            LEDGER.record_gemini_candles(bars)
+        except LedgerError:
+            LOG.warning("Gemini candle storage failed; awaiting next candle backfill")
+        finally:
+            GEMINI_CANDLES.task_done()
+
+
 class Handler(BaseHTTPRequestHandler):
     def reply(self, code, obj):
         payload = json.dumps(obj).encode("utf-8")
@@ -395,7 +470,7 @@ class Handler(BaseHTTPRequestHandler):
         if request.path == "/health":
             return self.reply(200, {"ok": True, "ready": not missing_configuration(),
                                     "service": "fahad20-ai-lens", "outcome_tracking": DURABLE_ENABLED})
-        if request.path != "/stats":
+        if request.path not in ("/stats", "/stats/gemini"):
             return self.reply(404, {"ok": False})
         header = self.headers.get("Authorization", "")
         if not WEBHOOK_SECRET or not hmac.compare_digest(header.encode(), ("Bearer " + WEBHOOK_SECRET).encode()):
@@ -406,16 +481,20 @@ class Handler(BaseHTTPRequestHandler):
         if period not in ("daily", "weekly"):
             return self.reply(400, {"ok": False, "message": "period must be daily or weekly"})
         try:
-            rows = LEDGER.trade_stats(period)
+            if request.path == "/stats/gemini":
+                rows = LEDGER.gemini_stats(period)
+            else:
+                rows = LEDGER.trade_stats(period)
         except LedgerError:
             return self.reply(503, {"ok": False, "message": "storage unavailable"})
         return self.reply(200, {"ok": True, "timezone": "America/New_York", "rows": rows})
 
     def do_POST(self):
         req = urlparse(self.path)
-        if req.path != "/webhook":
+        if req.path not in ("/webhook", "/webhook/gemini"):
             return self.reply(404, {"ok": False})
-        if missing_configuration():
+        is_gemini_candle = req.path == "/webhook/gemini"
+        if (not gemini_ready() if is_gemini_candle else missing_configuration()):
             return self.reply(503, {"ok": False, "message": "service configuration incomplete"})
         supplied = parse_qs(req.query).get("token", [""])[0]
         if not hmac.compare_digest(supplied, WEBHOOK_SECRET):
@@ -427,6 +506,17 @@ class Handler(BaseHTTPRequestHandler):
             packet = json.loads(self.rfile.read(size))
         except (ValueError, UnicodeError):
             return self.reply(400, {"ok": False})
+        if is_gemini_candle:
+            batch = gemini_lens.minute_batch(packet)
+            if batch is None or "SPX500" not in ALLOWED_TICKERS:
+                return self.reply(400, {"ok": False, "message": "invalid Gemini minute batch"})
+            try:
+                GEMINI_CANDLES.put_nowait(list(batch[1].values()))
+            except queue.Full:
+                return self.reply(503, {"ok": False, "message": "Gemini candle queue full"})
+            if not NEW_YORK_SESSION_ONLY or within_new_york_session(packet):
+                queue_gemini(gemini_lens.bounce(packet, batch))
+            return self.reply(200, {"ok": True, "queued": True})
         if DURABLE_ENABLED:
             batch = candle_batch(packet, ALLOWED_TICKERS)
             if batch:
@@ -460,6 +550,8 @@ class Handler(BaseHTTPRequestHandler):
             except queue.Full:
                 LEDGER.update(sid, status="failed", last_error="queue full")
                 return self.reply(503, {"ok": False, "message": "queue full"})
+            if packet["event"] in FAKEOUT_EVENTS and gemini_ready():
+                queue_gemini(gemini_lens.fakeout(packet))
             return self.reply(200, {"ok": True, "queued": True})
         identity = (packet["symbol"], packet["timeframe"], packet["time"], packet["event"])
         with SEEN_LOCK:
@@ -490,6 +582,10 @@ if __name__ == "__main__":
     threading.Thread(target=worker, args=(WATCH_Q,), daemon=True).start()
     if DURABLE_ENABLED:
         threading.Thread(target=candle_worker, daemon=True).start()
+    if gemini_ready():
+        threading.Thread(target=gemini_worker, daemon=True).start()
+        threading.Thread(target=gemini_candle_worker, daemon=True).start()
+        threading.Thread(target=probe_gemini_lane, daemon=True).start()
     LOG.info("Listening on port %d", PORT)
     LOG.info("Alert scope tickers=%s new_york_session_only=%s",
              ",".join(sorted(ALLOWED_TICKERS)), NEW_YORK_SESSION_ONLY)

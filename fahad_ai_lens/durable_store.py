@@ -137,3 +137,20 @@ class SignalLedger:
     def orb_stats(self, period):
         query = "?period=eq." + period + "&order=period_start.desc,side&limit=300"
         return self._request("GET", query, resource="lens_openai_orb_stats") or []
+
+    def fvg_structure(self, closed):
+        return self._request("POST", payload={"as_of": closed.isoformat()},
+                             resource="rpc/lens_fvg_structure") or []
+
+    def insert_fvg(self, row):
+        return bool(self._request("POST", "?on_conflict=candle_time", row,
+                                  prefer="resolution=ignore-duplicates,return=representation",
+                                  resource="lens_openai_fvg"))
+
+    def review_fvg(self, closed, status):
+        query = "?" + urllib.parse.urlencode({"candle_time": "eq." + closed.isoformat()})
+        self._request("PATCH", query, {"review_status": status}, resource="lens_openai_fvg")
+
+    def fvg_stats(self, period):
+        query = "?period=eq." + period + "&order=period_start.desc,side&limit=300"
+        return self._request("GET", query, resource="lens_openai_fvg_stats") or []

@@ -12,7 +12,7 @@ import hashlib
 import time
 from urllib.error import HTTPError, URLError
 try:
-    from fahad_ai_lens import gemini_lens, opening_range
+    from fahad_ai_lens import gemini_lens, opening_range, fvg
     from fahad_ai_lens.delivery_policy import signal_id, expired, retry_policy
     from fahad_ai_lens.durable_store import SignalLedger, LedgerError
     from fahad_ai_lens.trade_outcomes import candle_batch, positive, stamp, tracking_fields
@@ -21,6 +21,7 @@ except ModuleNotFoundError as exc:
         raise
     import gemini_lens
     import opening_range
+    import fvg
     from delivery_policy import signal_id, expired, retry_policy
     from durable_store import SignalLedger, LedgerError
     from trade_outcomes import candle_batch, positive, stamp, tracking_fields
@@ -67,6 +68,7 @@ GEMINI_CANDLES = queue.Queue(maxsize=120)
 OPENAI_ORB_ENABLED = os.getenv("OPENAI_ORB_ENABLED", "false").lower() == "true"
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 OPENAI_ORB_MODEL = os.getenv("OPENAI_ORB_MODEL", "gpt-5-mini")
+FVG_CANDLES = queue.Queue(maxsize=30)
 ORB_CANDLES = queue.Queue(maxsize=30)
 
 
@@ -455,6 +457,12 @@ def gemini_candle_worker():
         bars = GEMINI_CANDLES.get()
         try:
             LEDGER.record_gemini_candles(bars)
+            latest = max(bar["closed_at"] for bar in bars)
+            if OPENAI_API_KEY and stamp(latest).minute % 5 == 0 and within_new_york_session({"time": latest}):
+                try:
+                    FVG_CANDLES.put_nowait(latest)
+                except queue.Full:
+                    LOG.warning("OpenAI FVG queue full")
             if orb_ready():
                 try:
                     ORB_CANDLES.put_nowait(max(bar["closed_at"] for bar in bars))
@@ -464,6 +472,36 @@ def gemini_candle_worker():
             LOG.warning("Gemini candle storage failed; awaiting next candle backfill")
         finally:
             GEMINI_CANDLES.task_done()
+
+
+def fvg_worker():
+    while True:
+        latest = FVG_CANDLES.get()
+        try:
+            closed = stamp(latest).astimezone(NEW_YORK)
+            opened = closed.replace(hour=9, minute=30, second=0, microsecond=0)
+            side = fvg.bias(LEDGER.fvg_structure(closed))
+            if side is None:
+                continue
+            setup = fvg.candidate(LEDGER.opening_range_bars(opened, closed), opened, closed, side)
+            if not setup:
+                continue
+            row = {k: v for k, v in setup.items() if k not in ("candle", "pattern", "bias_4h")}
+            if not LEDGER.insert_fvg(row):
+                continue
+            if expired({"time": latest}):
+                LEDGER.review_fvg(closed, "expired")
+                continue
+            try:
+                verdict, _ = opening_range.review(setup, post_json, OPENAI_ORB_MODEL, OPENAI_API_KEY)
+            except Exception:
+                LEDGER.review_fvg(closed, "review_failed")
+                raise
+            LEDGER.review_fvg(closed, verdict.lower())
+        except Exception as error:
+            LOG.warning("OpenAI FVG review pipeline failed: %s", failure_detail("fvg", error))
+        finally:
+            FVG_CANDLES.task_done()
 
 
 def orb_ready():
@@ -536,7 +574,7 @@ class Handler(BaseHTTPRequestHandler):
         if request.path == "/health":
             return self.reply(200, {"ok": True, "ready": not missing_configuration(),
                                     "service": "fahad20-ai-lens", "outcome_tracking": DURABLE_ENABLED})
-        if request.path not in ("/stats", "/stats/gemini", "/stats/openai"):
+        if request.path not in ("/stats", "/stats/gemini", "/stats/openai", "/stats/openai/fvg"):
             return self.reply(404, {"ok": False})
         header = self.headers.get("Authorization", "")
         if not WEBHOOK_SECRET or not hmac.compare_digest(header.encode(), ("Bearer " + WEBHOOK_SECRET).encode()):
@@ -549,6 +587,8 @@ class Handler(BaseHTTPRequestHandler):
         try:
             if request.path == "/stats/gemini":
                 rows = LEDGER.gemini_stats(period)
+            elif request.path == "/stats/openai/fvg":
+                rows = LEDGER.fvg_stats(period)
             elif request.path == "/stats/openai":
                 rows = LEDGER.orb_stats(period)
             else:
@@ -654,6 +694,8 @@ if __name__ == "__main__":
         threading.Thread(target=gemini_worker, daemon=True).start()
         threading.Thread(target=gemini_candle_worker, daemon=True).start()
         threading.Thread(target=probe_gemini_lane, daemon=True).start()
+    if gemini_ready() and OPENAI_API_KEY:
+        threading.Thread(target=fvg_worker, daemon=True).start()
     if orb_ready():
         threading.Thread(target=orb_worker, daemon=True).start()
     LOG.info("Listening on port %d", PORT)

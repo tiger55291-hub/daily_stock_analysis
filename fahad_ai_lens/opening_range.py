@@ -59,6 +59,10 @@ def review(setup, post_json, model, api_key):
             }, "required": ["decision", "reason"], "additionalProperties": False,
         }}},
     }
+    if setup.get("pattern") == "FVG_RETEST":
+        request["instructions"] = ("Review the first 5-minute fair value gap retest in the supplied "
+            "confirmed 4-hour direction. Choose WATCH for a convincing rejection or WAIT. "
+            "Use only supplied data. Keep the Arabic reason brief. Preserve levels and side.")
     response = post_json("https://api.openai.com/v1/responses", request,
                          headers={"Authorization": "Bearer " + api_key}, timeout=15)
     for item in response.get("output", []):

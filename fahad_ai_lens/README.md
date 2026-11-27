@@ -135,3 +135,17 @@ dual hit. The stats separately count a close back inside the range within
 five minutes and expose missing-data cases. Use the existing bearer auth
 with `/stats/openai?period=daily` or `?period=weekly`. Review after 10 observed
 sessions using these baseline counts and the subset sent to Telegram.
+
+### OpenAI FVG shadow comparison
+The independent SPX500 FVG lane uses completed 4-hour UTC buckets of 48 five-minute
+bars. Two confirmed higher swing highs and lows define bullish bias, and two lower
+highs and lows define bearish bias. One bar on either side confirms a swing.
+The signal uses the first five-minute retest and directional rejection of a
+three-bar gap formed during the same New York cash session. A missing minute
+breaks the five-minute sequence. If multiple gaps qualify, the newest wins.
+Review uses the configured OpenAI model. Results are paper observations with
+a ten-point target, a stop 0.1 point beyond the gap/rejection extreme and a
+60-minute window. A simultaneous stop and target on a minute bar counts as a
+loss. Inspect authenticated GET /stats/openai/fvg for daily or weekly results
+grouped by verdict. This lane uses the existing candle feeds and emits no
+Telegram messages during evaluation.
